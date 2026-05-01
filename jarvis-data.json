@@ -1,0 +1,16 @@
+{
+  "jarvis_streak": {
+    "count": 3,
+    "lastDate": "Sat May 02 2026"
+  },
+  "jarvis_goals": {
+    "date": "Fri May 01 2026",
+    "items": [
+      {
+        "text": "Learn Ansible",
+        "done": false,
+        "created": 1777580946432
+      }
+    ]
+  }
+}

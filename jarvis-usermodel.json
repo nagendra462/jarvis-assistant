@@ -1,0 +1,38 @@
+{
+  "profile": {
+    "name": "Nag",
+    "profession": null,
+    "company": null,
+    "currentFocus": [],
+    "longTermGoals": [],
+    "timezone": "Asia/Calcutta",
+    "createdAt": "2026-05-01T13:19:27.151Z",
+    "updatedAt": "2026-05-01T13:19:27.151Z"
+  },
+  "behavioral": {
+    "averageSleepTime": null,
+    "averageWakeTime": null,
+    "peakFocusHour": null,
+    "procrastinationTriggers": [],
+    "followThroughRate": null,
+    "mostProductiveDay": null,
+    "lateNightCount": 0
+  },
+  "emotional": {
+    "recentMood": null,
+    "stressTriggers": [],
+    "motivationSources": [],
+    "lastLowPoint": null,
+    "lastHighPoint": null,
+    "moodHistory": []
+  },
+  "goals": {
+    "longTerm": [],
+    "completionHistory": {}
+  },
+  "relationships": [],
+  "skills": [],
+  "weeklyPatterns": [],
+  "readingLog": [],
+  "lastModelUpdate": null
+}
