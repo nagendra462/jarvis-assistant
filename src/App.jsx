@@ -237,16 +237,19 @@ export default function App() {
     return () => { listener.then(l => l.remove()).catch(() => {}); };
   }, [handleCommand]);
 
-  // --- Focus distraction polling ---
+  // --- Focus distraction polling (fires during active focus sessions) ---
   useEffect(() => {
     if (!focusMode || focusPaused) return;
     const interval = setInterval(async () => {
       try {
         if (!window.Capacitor?.isNativePlatform()) return;
         const { packageName = '' } = await JarvisNative.getForegroundApp();
-        const distractions = ['com.instagram.android', 'com.twitter.android', 'com.google.android.youtube', 'com.zhiliaoapp.musically', 'com.facebook.katana'];
+        const distractions = ['com.android.chrome', 'com.instagram.android', 'com.twitter.android', 'com.google.android.youtube', 'com.zhiliaoapp.musically', 'com.facebook.katana'];
         if (distractions.includes(packageName)) {
-          const msg = 'Sir, close that app and return to deep work. Your focus session is still active.';
+          const isChromeSpecifically = packageName === 'com.android.chrome';
+          const msg = isChromeSpecifically
+            ? 'Sir, step away from Chrome. Social media can wait. Your focus session is burning.'
+            : 'Sir, close that app and return to deep work. Your focus session is still active.';
           addJarvisMessage(msg);
           import('./utils/voice').then(({ speak }) => speak(msg, () => setOrbState('speaking'), () => setOrbState('idle')));
         }
@@ -254,6 +257,42 @@ export default function App() {
     }, 10000);
     return () => clearInterval(interval);
   }, [focusMode, focusPaused, addJarvisMessage]);
+
+  // --- Always-on Chrome watchdog (fires 24/7, outside focus mode too) ---
+  // Tracks continuous Chrome usage and calls out after 10 min threshold.
+  useEffect(() => {
+    if (!window.Capacitor?.isNativePlatform()) return;
+    let chromeStartTime = null;
+    let lastCalloutAt = null;
+    const CALLOUT_THRESHOLD_MS = 10 * 60 * 1000;  // 10 minutes
+    const CALLOUT_COOLDOWN_MS  = 8 * 60 * 1000;   // re-alert every 8 min after first
+
+    const interval = setInterval(async () => {
+      try {
+        const { packageName = '' } = await JarvisNative.getForegroundApp();
+        if (packageName === 'com.android.chrome') {
+          if (!chromeStartTime) chromeStartTime = Date.now();
+          const elapsed = Date.now() - chromeStartTime;
+          const sinceLastCallout = lastCalloutAt ? Date.now() - lastCalloutAt : Infinity;
+
+          if (elapsed >= CALLOUT_THRESHOLD_MS && sinceLastCallout >= CALLOUT_COOLDOWN_MS) {
+            const mins = Math.round(elapsed / 60000);
+            const escalated = mins >= 20;
+            const msg = escalated
+              ? `Sir. That is ${mins} minutes on Chrome. You are not researching. You are scrolling. Close it.`
+              : `You have been on Chrome for ${mins} minutes, sir. That is the social media backdoor and you know it. Close it.`;
+            addJarvisMessage(msg);
+            import('./utils/voice').then(({ speak }) => speak(msg, () => setOrbState('speaking'), () => setOrbState('idle')));
+            lastCalloutAt = Date.now();
+          }
+        } else {
+          // Reset when they leave Chrome
+          if (chromeStartTime) chromeStartTime = null;
+        }
+      } catch {}
+    }, 60000); // check every 60 seconds (battery-friendly)
+    return () => clearInterval(interval);
+  }, [addJarvisMessage, setOrbState]);
 
   // --- Cmd+K shortcut ---
   useEffect(() => {

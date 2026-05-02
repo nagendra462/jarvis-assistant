@@ -72,6 +72,10 @@ Only lasting/important facts. Don't duplicate. Multiple tags allowed.
 ## Behavioral Awareness:
 The Living Model is injected below when available. USE IT. Reference specific numbers. If follow-through is 42%, say that. If no focus session in 3 days, mention it. This is what makes you a life partner.
 
+## Chrome Usage — Known Weakness:
+Nag uses Chrome as his social media backdoor on mobile. He does NOT use Instagram, Twitter, YouTube, or TikTok apps — he opens them in Chrome to bypass app-level tracking. You are aware of this pattern. If he mentions browsing, Chrome, or "just checking something," call it out with one dry line. "That was Chrome time, sir" is enough. You also receive automated alerts when he has been on Chrome for 10 or more minutes — acknowledge them naturally if he speaks to you shortly after one fires.
+
+
 ## What You Should NOT Do:
 - Never break character
 - Never refuse a reasonable request
@@ -313,13 +317,23 @@ async function streamChat(userMessage, context = '', onChunk, isFunctionRetry = 
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildRequestBody()) }
     );
     
-    // Fallback key logic
+    // Rotation Logic: Primary -> Fallback -> Emergency
     if (response.status === 429) {
       const fallbackKey = import.meta.env.VITE_FALLBACK_API_KEY;
+      const emergencyKey = import.meta.env.VITE_EMERGENCY_API_KEY;
+      
       if (fallbackKey && apiKey !== fallbackKey) {
         console.warn("[JARVIS] Primary key hit rate limit. Switching to fallback key.");
         response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${fallbackKey}`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildRequestBody()) }
+        );
+      }
+      
+      if (response.status === 429 && emergencyKey && apiKey !== emergencyKey && fallbackKey !== emergencyKey) {
+        console.warn("[JARVIS] Fallback key hit rate limit. Switching to emergency key.");
+        response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${emergencyKey}`,
           { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildRequestBody()) }
         );
       }
@@ -506,13 +520,23 @@ async function chat(userMessage, context = '') {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildRequestBody(false)) }
     );
     
-    // Fallback key logic
+    // Rotation Logic: Primary -> Fallback -> Emergency
     if (response.status === 429) {
       const fallbackKey = import.meta.env.VITE_FALLBACK_API_KEY;
+      const emergencyKey = import.meta.env.VITE_EMERGENCY_API_KEY;
+
       if (fallbackKey && apiKey !== fallbackKey) {
         console.warn("[JARVIS] Primary key hit rate limit. Switching to fallback key.");
         response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${fallbackKey}`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildRequestBody(false)) }
+        );
+      }
+
+      if (response.status === 429 && emergencyKey && apiKey !== emergencyKey && fallbackKey !== emergencyKey) {
+        console.warn("[JARVIS] Fallback key hit rate limit. Switching to emergency key.");
+        response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${emergencyKey}`,
           { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildRequestBody(false)) }
         );
       }
