@@ -3,9 +3,9 @@ import { speak, getVoiceSettings, saveVoiceSettings } from '../utils/voice';
 
 export default function SettingsPanel({ onClose }) {
   const saved = getVoiceSettings();
-  const [pitch, setPitch] = useState(saved.pitch ?? -2);
-  const [rate, setRate]   = useState(saved.rate  ?? -5);
-  const [bass, setBass]   = useState(saved.bass  ??  3);
+  const [pitch, setPitch] = useState(saved.pitch ?? 0);
+  const [rate, setRate]   = useState(saved.rate  ?? 0);
+  const [bass, setBass]   = useState(saved.bass  ?? 0);
   const [voiceStatus, setVoiceStatus] = useState('');
 
   function handleSaveVoice() {
@@ -64,7 +64,7 @@ export default function SettingsPanel({ onClose }) {
             <div className="slider-row">
               <span className="slider-label">Pitch</span>
               <input
-                type="range" min="-8" max="4" step="1"
+                type="range" min="-5" max="5" step="1"
                 value={pitch}
                 onChange={e => setPitch(Number(e.target.value))}
                 className="voice-slider"
@@ -75,7 +75,7 @@ export default function SettingsPanel({ onClose }) {
             <div className="slider-row">
               <span className="slider-label">Speed</span>
               <input
-                type="range" min="-25" max="10" step="1"
+                type="range" min="-30" max="10" step="1"
                 value={rate}
                 onChange={e => setRate(Number(e.target.value))}
                 className="voice-slider"

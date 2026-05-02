@@ -1,26 +1,23 @@
-// Local Sync — shares data between devices via the Mac Vite server
-// Falls back to localStorage when server is unreachable
+// Local Sync — shares data between devices via native filesystem on mobile
+// Falls back to localStorage if filesystem is unavailable
+
+import { readJson, writeJson } from './storage.js';
 
 export async function syncSave(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
   try {
-    await fetch('/api/data', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key, value }),
-    });
+    const data = await readJson('jarvis-data.json') || {};
+    data[key] = value;
+    await writeJson('jarvis-data.json', data);
   } catch {} // silent fail
 }
 
 export async function syncLoad(key, fallback) {
   try {
-    const res = await fetch(`/api/data/${key}`);
-    if (res.ok) {
-      const { value } = await res.json();
-      if (value !== null && value !== undefined) {
-        localStorage.setItem(key, JSON.stringify(value));
-        return value;
-      }
+    const data = await readJson('jarvis-data.json');
+    if (data && data[key] !== undefined && data[key] !== null) {
+      localStorage.setItem(key, JSON.stringify(data[key]));
+      return data[key];
     }
   } catch {}
   try {

@@ -11,7 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
-
+.env
+.env.*
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -22,3 +23,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# JARVIS personal data — never commit
+jarvis-data.json
+jarvis-usermodel.json
+jarvis-journals/
+android/local.properties

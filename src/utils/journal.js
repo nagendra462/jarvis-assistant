@@ -1,6 +1,4 @@
-// JARVIS Journal System
-// One JSON entry per day, persisted server-side in jarvis-journals/
-// Aggregates: morning ritual, evening debrief, focus sessions, goals, mood
+import { writeJson, readJson, listJsonFiles } from './storage.js';
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -8,19 +6,27 @@ const today = () => new Date().toISOString().slice(0, 10);
 export async function saveJournal(updates) {
   const date = updates.date || today();
   try {
-    const res = await fetch('/api/journal', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, ...updates }),
-    });
-    return res.ok;
+    const success = await writeJson(`jarvis-journals/${date}.json`, { date, ...updates });
+    if (success) {
+      import('./rag.js').then(m => {
+        // Only embed meaningful text fields to avoid noise
+        const textToEmbed = Object.entries(updates)
+          .filter(([k, v]) => typeof v === 'string' && v.length > 10)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join(' | ');
+        if (textToEmbed) {
+          m.storeSemanticMemory(`Journal [${date}]: ${textToEmbed}`, 'journal').catch(()=>{});
+        }
+      });
+    }
+    return success;
   } catch { return false; }
 }
 
 export async function loadJournal(date = today()) {
   try {
-    const res = await fetch(`/api/journal/get?date=${date}`);
-    if (res.ok) return await res.json();
+    const data = await readJson(`jarvis-journals/${date}.json`);
+    if (data) return data;
   } catch {}
   // Fallback to localStorage
   try { return JSON.parse(localStorage.getItem(`jarvis_journal_${date}`) || '{}'); } catch { return {}; }
@@ -28,8 +34,21 @@ export async function loadJournal(date = today()) {
 
 export async function listJournals(days = 30) {
   try {
-    const res = await fetch(`/api/journal/list?days=${days}`);
-    if (res.ok) return await res.json();
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    const files = await listJsonFiles('jarvis-journals');
+    const dates = files
+      .map(f => f.replace('.json', ''))
+      .filter(d => new Date(d) >= cutoff)
+      .sort()
+      .reverse();
+    
+    const journals = [];
+    for (const d of dates) {
+      const data = await readJson(`jarvis-journals/${d}.json`);
+      if (data) journals.push({ date: d, ...data });
+    }
+    return journals;
   } catch {}
   return [];
 }

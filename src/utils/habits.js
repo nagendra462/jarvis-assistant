@@ -2,6 +2,7 @@
 // Track multiple habits with streaks, manage sleep/wake times
 
 import { getItem, setItem } from './store';
+import { scheduleNotification, cancelNotification } from './notifications.js';
 
 // ===== Habit Tracking =====
 function getHabits() {
@@ -86,10 +87,29 @@ function getSleepSchedule() {
 }
 
 function setSleepSchedule(schedule) {
-  setItem('jarvis_sleep_schedule', {
-    ...getSleepSchedule(),
-    ...schedule,
-  });
+  const current = getSleepSchedule();
+  const updated = { ...current, ...schedule };
+  setItem('jarvis_sleep_schedule', updated);
+
+  if (updated.wakeTime) {
+    const [h, m] = updated.wakeTime.split(':').map(Number);
+    const date = new Date();
+    date.setHours(h, m, 0, 0);
+    if (date.getTime() < Date.now()) date.setDate(date.getDate() + 1);
+    
+    cancelNotification(1001);
+    scheduleNotification(1001, 'JARVIS Wake Alarm', `Rise and shine, sir! It's ${updated.wakeTime} — time to conquer the day.`, date);
+  }
+  
+  if (updated.bedtime) {
+    const [h, m] = updated.bedtime.split(':').map(Number);
+    const date = new Date();
+    date.setHours(h, m, 0, 0);
+    if (date.getTime() < Date.now()) date.setDate(date.getDate() + 1);
+    
+    cancelNotification(1002);
+    scheduleNotification(1002, 'JARVIS Bedtime', `Sir, it is your target bedtime (${updated.bedtime}). Systems powering down.`, date);
+  }
 }
 
 // Check if it's time for sleep or wake reminders — ESCALATING WARNINGS

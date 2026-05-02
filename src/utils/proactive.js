@@ -3,6 +3,9 @@
 
 import { getGoals, getStreak, getNotes, formatTime, formatDate } from './jarvis-brain.js';
 import { getMemories } from './gemini.js';
+import { loadJournal } from './journal.js';
+import { loadUserModel } from './memory.js';
+import { scheduleNotification } from './notifications.js';
 
 // ===== Reminder System =====
 function getReminders() {
@@ -17,13 +20,21 @@ function saveReminders(reminders) {
 
 function addReminder(text, minutesFromNow) {
   const reminders = getReminders();
+  const triggerAt = Date.now() + (minutesFromNow * 60 * 1000);
+  const id = Math.floor(Math.random() * 2000000000);
+  
   reminders.push({
+    id,
     text,
-    triggerAt: Date.now() + (minutesFromNow * 60 * 1000),
+    triggerAt,
     created: Date.now(),
     fired: false,
   });
   saveReminders(reminders);
+  
+  // Schedule native notification
+  scheduleNotification(id, 'JARVIS Reminder', text, new Date(triggerAt));
+  
   return reminders.length;
 }
 
@@ -58,7 +69,7 @@ function checkReminders() {
 }
 
 // ===== Daily Briefing =====
-function generateBriefing() {
+async function generateBriefing() {
   const goals = getGoals();
   const streak = getStreak();
   const memories = getMemories();
@@ -76,10 +87,52 @@ function generateBriefing() {
 
   let briefing = `${timeGreeting}, ${name}. Here's your briefing for **${formatDate()}**:\n\n`;
 
+  // Yesterday's context
+  try {
+    const yesterdayDate = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    const yesterday = await loadJournal(yesterdayDate);
+    let yContext = [];
+    if (yesterday && Object.keys(yesterday).length > 0) {
+      if (yesterday.eveningDebrief?.biggestWin) {
+        yContext.push(`Yesterday's biggest win was "${yesterday.eveningDebrief.biggestWin}".`);
+      }
+      if (yesterday.eveningDebrief?.carryForward) {
+        yContext.push(`You mentioned struggling with "${yesterday.eveningDebrief.carryForward}". Let's clear that block today.`);
+      } else if (yesterday.morningRitual?.todayMITs) {
+        const set = yesterday.morningRitual.todayMITs.length;
+        const done = yesterday.eveningDebrief?.mitsCompleted || 0;
+        yContext.push(`You finished ${done} of your ${set} MITs yesterday.`);
+      }
+      if (yesterday.focusSessions?.length) {
+        const completed = yesterday.focusSessions.filter(s => s.completed).length;
+        if (completed > 0) yContext.push(`You completed ${completed} focus session${completed > 1 ? 's' : ''}.`);
+      }
+      
+      if (yContext.length > 0) {
+        briefing += `**Yesterday's Review:**\n${yContext.join(' ')}\n\n`;
+      }
+    }
+  } catch (e) { console.error('Failed to load yesterday journal for briefing', e); }
+
   // Streak
   if (streak.count > 0) {
     briefing += `🔥 **Streak**: ${streak.count} day${streak.count > 1 ? 's' : ''} and counting.\n\n`;
   }
+
+  // Relationship Follow-ups
+  try {
+    const model = await loadUserModel();
+    const nowMs = Date.now();
+    const followUpPeople = (model.relationships || []).filter(r => {
+      const msAgo = nowMs - new Date(r.lastMentioned).getTime();
+      const daysAgo = Math.floor(msAgo / 86400000);
+      return daysAgo >= 1 && daysAgo <= 3;
+    });
+    if (followUpPeople.length > 0) {
+      const names = followUpPeople.map(p => p.name).join(' and ');
+      briefing += `👥 **Relationships:** You mentioned ${names} recently. Just checking — any follow-up needed there?\n\n`;
+    }
+  } catch (e) { console.error('Failed to load relationships', e); }
 
   // Goals
   if (goals.items.length > 0) {

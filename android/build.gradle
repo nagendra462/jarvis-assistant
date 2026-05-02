@@ -21,6 +21,8 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // Required for VOSK offline speech recognition
+        maven { url 'https://alphacephei.com/maven/' }
     }
 }
 

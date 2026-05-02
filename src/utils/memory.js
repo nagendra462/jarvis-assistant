@@ -4,6 +4,7 @@
 
 import { getMemories } from './gemini.js';
 import { listJournals, getRecentJournalContext } from './journal.js';
+import { readJson, writeJson } from './storage.js';
 
 // ===== Default model structure =====
 function defaultModel() {
@@ -43,6 +44,7 @@ function defaultModel() {
     skills: [],                   // managed by skills.js, mirrored here for context
     weeklyPatterns: [],           // [{ week, focusHours, goalsSet, goalsCompleted, ... }]
     readingLog: [],               // managed by reader.js, mirrored here
+    recentExchanges: [],          // [{ date, userMsg, jarvisReply }]
     lastModelUpdate: null,
   };
 }
@@ -53,13 +55,10 @@ let _modelCache = null;
 export async function loadUserModel() {
   if (_modelCache) return _modelCache;
   try {
-    const res = await fetch('/api/model');
-    if (res.ok) {
-      const data = await res.json();
-      if (data && Object.keys(data).length > 0) {
-        _modelCache = { ...defaultModel(), ...data };
-        return _modelCache;
-      }
+    const data = await readJson('jarvis-usermodel.json');
+    if (data && Object.keys(data).length > 0) {
+      _modelCache = { ...defaultModel(), ...data };
+      return _modelCache;
     }
   } catch {}
   // Fallback
@@ -77,11 +76,7 @@ export async function saveUserModel(model) {
   _modelCache = model;
   localStorage.setItem('jarvis_usermodel', JSON.stringify(model));
   try {
-    await fetch('/api/model', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(model),
-    });
+    await writeJson('jarvis-usermodel.json', model);
   } catch {}
 }
 
@@ -142,6 +137,15 @@ export async function trackRelationship(name, role, context) {
     model.relationships.push({ name, role, context, lastMentioned: new Date().toISOString().slice(0, 10) });
     if (model.relationships.length > 50) model.relationships.shift();
   }
+  await saveUserModel(model);
+}
+
+// ===== Track significant exchanges for cross-session continuity =====
+export async function logSignificantExchange(userMsg, jarvisReply) {
+  const model = await loadUserModel();
+  if (!model.recentExchanges) model.recentExchanges = [];
+  model.recentExchanges.unshift({ date: new Date().toISOString(), userMsg, jarvisReply });
+  if (model.recentExchanges.length > 10) model.recentExchanges.pop();
   await saveUserModel(model);
 }
 
@@ -239,9 +243,18 @@ export async function getModelContext() {
   }
 
   // Relationships
-  if (model.relationships.length > 0) {
+  if (model.relationships && model.relationships.length > 0) {
     const recent = model.relationships.slice(0, 3).map(r => `${r.name} (${r.role})`).join(', ');
     parts.push(`**People mentioned recently:** ${recent}`);
+  }
+
+  // Recent exchanges
+  if (model.recentExchanges && model.recentExchanges.length > 0) {
+    parts.push('\n## Recent Notable Exchanges:');
+    model.recentExchanges.slice(0, 3).forEach(ex => {
+      const dateStr = ex.date.slice(0, 10);
+      parts.push(`[${dateStr}] User: "${ex.userMsg}" -> JARVIS: "${ex.jarvisReply}"`);
+    });
   }
 
   return parts.join('\n') + recentJournals;

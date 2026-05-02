@@ -1,5 +1,6 @@
-// JARVIS Brain — the personality, responses, and command processing engine
 import { chat as geminiChat, streamChat as geminiStreamChat, isConfigured as isGeminiConfigured } from './gemini';
+import { readJson, writeJson } from './storage.js';
+import { syncToFirebase } from './firebaseSync.js';
 
 const GREETINGS = {
   morning: [
@@ -118,13 +119,15 @@ function formatDate() {
 }
 
 // ===== Server sync helper =====
-function serverSave(key, value) {
-  // Fire-and-forget — save to server for cross-device sync
-  fetch('/api/data', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key, value }),
-  }).catch(() => {}); // silent fail if server unreachable
+async function serverSave(key, value) {
+  // Save to native mobile filesystem via Capacitor
+  try {
+    const data = await readJson('jarvis-data.json') || {};
+    data[key] = value;
+    await writeJson('jarvis-data.json', data);
+  } catch (e) {}
+  
+  syncToFirebase(key, value);
 }
 
 // Notes management
@@ -191,6 +194,31 @@ function deleteGoal(index) {
     saveGoals(goals);
   }
   return goals;
+}
+
+// Master Backlog (Chief of Staff Engine)
+export function getBacklog() {
+  try { return JSON.parse(localStorage.getItem('jarvis_backlog') || '[]'); }
+  catch { return []; }
+}
+
+export function saveBacklog(backlog) {
+  localStorage.setItem('jarvis_backlog', JSON.stringify(backlog));
+  serverSave('jarvis_backlog', backlog);
+}
+
+export function addProjectToBacklog(projectName, tasks) {
+  const backlog = getBacklog();
+  const newProject = {
+    id: Date.now().toString(),
+    title: projectName,
+    type: 'project',
+    created: Date.now(),
+    tasks: tasks.map((t, i) => ({ id: `t_${Date.now()}_${i}`, text: t, status: 'pending' }))
+  };
+  backlog.push(newProject);
+  saveBacklog(backlog);
+  return newProject;
 }
 
 // Streak tracking
@@ -312,7 +340,7 @@ export async function processCommand(input) {
   }
 
   // Goals — show (triggers overlay)
-  if (/\b(show|list|view|open|my)\s*(all\s*)?(goals?|mission|tasks?|todos?)\b/.test(text)) {
+  if (/\b(show|list|view|open|my)\s*(all\s*)?(goals?|mission|tasks?|todos?|plan|schedule)\b/i.test(text) || /\bwhat('?s|\s+is)\s+(the\s+)?plan\b/i.test(text)) {
     return { text: '__SHOW_GOALS__', type: 'goals_ui' };
   }
 
@@ -454,16 +482,6 @@ export async function processCommand(input) {
     return { text: '__READING_LOG__', type: 'reading_log_ui' };
   }
 
-  // ===== Morning Ritual =====
-  if (/\b(morning\s*(ritual|check.?in|review)|start\s*my\s*day|daily\s*check.?in|good\s*morning.*ritual)\b/i.test(text)) {
-    return { text: '__MORNING_RITUAL__', type: 'morning_ritual' };
-  }
-
-  // ===== Evening Debrief =====
-  if (/\b(evening\s*(debrief|check.?in|review)|end\s*(of\s*)?day.*debrief|daily\s*debrief)\b/i.test(text)) {
-    return { text: '__EVENING_DEBRIEF__', type: 'evening_debrief' };
-  }
-
   // ===== URL Reading =====
   if (/https?:\/\/[^\s]+/.test(input)) {
     return { text: '__READ_URL__', type: 'read_url', raw: input };
@@ -484,7 +502,7 @@ export async function processCommand(input) {
   }
 
   // Date
-  if (/\b(what.*(date|day)|today'?s?\s*date|what day)\b/i.test(text)) {
+  if (/\b(what(\s+is|\'s)\s+(the\s+)?(date|day)|today'?s?\s*date)\b/i.test(text)) {
     return { text: `Today is **${formatDate()}**, sir.`, type: 'info' };
   }
 
@@ -512,56 +530,6 @@ export async function processCommand(input) {
     return { text: '', type: 'ai_needed' };
   }
 
-  // ===== No AI — use basic regex responses =====
-
-  // Greetings
-  if (/^(hi|hello|hey|yo|sup|good\s*(morning|afternoon|evening|night)|greetings|jarvis)\s*$/i.test(text)) {
-    return { text: getGreeting(), type: 'greeting' };
-  }
-
-  // Time
-  if (/\b(what\s*time|current\s*time)\b/.test(text)) {
-    return { text: `It's currently **${formatTime()}**, sir.`, type: 'info' };
-  }
-
-  // Date
-  if (/\b(what.*(date|day)|today's date)\b/.test(text)) {
-    return { text: `Today is **${formatDate()}**, sir.`, type: 'info' };
-  }
-
-  // Weather
-  if (/\b(weather|temperature|forecast)\b/.test(text)) {
-    return { text: await getWeather(), type: 'weather', async: true };
-  }
-
-  // Calculator
-  if (/\b(calc|calculate|compute)\b/.test(text) || /^\d+[\s]*[+\-*/^]/.test(text)) {
-    const expr = text.replace(/^(calc|calculate|compute)\s*/i, '').replace(/\?$/, '');
-    const result = calculate(expr);
-    if (result !== null) {
-      return { text: `The answer is **${result}**, sir.`, type: 'calc' };
-    }
-  }
-
-  // Motivation
-  if (/(motivat|inspir|push me|i need a push|pump me|fire me up|hype me)/i.test(text)) {
-    const q = pickRandom(MOTIVATIONAL_QUOTES);
-    return { text: `*"${q.text}"*\n— **${q.author}**\n\nRemember, sir — you're not here to be average. You're here to be extraordinary.`, type: 'motivation' };
-  }
-
-  // Daily report
-  if (/^(daily\s*report|show\s*report|my\s*report)$/i.test(text)) {
-    return { text: getDailyReport(), type: 'report' };
-  }
-
-  // Who are you
-  if (/\b(who are you|your name|what are you)\b/.test(text)) {
-    return {
-      text: "I am **J.A.R.V.I.S.** — Just A Rather Very Intelligent System. I'm your personal assistant, life strategist, and accountability partner. Connect my **AI Brain** in Settings to unlock my full potential, sir.",
-      type: 'info'
-    };
-  }
-
   // Fallback — no AI configured
   return {
     text: "I'd love to help with that, sir, but my AI brain isn't connected yet. Open **Settings → AI Brain** and add your free Gemini API key. Then I'll be able to understand and help with **anything** you ask.",
@@ -583,9 +551,16 @@ export function buildAIContext() {
     const pending = goals.items.filter(g => !g.done).map(g => g.text);
     if (pending.length > 0) contextParts.push(`Pending goals: ${pending.slice(0, 3).join(', ')}`);
   }
+  
+  const backlog = getBacklog();
+  const activeProjects = backlog.filter(p => p.tasks.some(t => t.status === 'pending'));
+  if (activeProjects.length > 0) {
+    contextParts.push(`Master Backlog has ${activeProjects.length} active projects.`);
+  }
+  
   if (notes.length > 0) contextParts.push(`User has ${notes.length} saved notes`);
   return contextParts.join('. ');
 }
 
-export { getGreeting, getGoals, addGoal, toggleGoal, deleteGoal, saveStreak, getStreak, getNotes, FOCUS_ENCOURAGEMENTS, TASK_COMPLETE_RESPONSES, pickRandom, formatTime, formatDate, isGeminiConfigured };
+export { getGreeting, getGoals, addGoal, toggleGoal, deleteGoal, saveStreak, getStreak, getNotes, addNote, FOCUS_ENCOURAGEMENTS, TASK_COMPLETE_RESPONSES, pickRandom, formatTime, formatDate, isGeminiConfigured };
 

@@ -124,6 +124,37 @@ export function checkFocusDrop() {
   return `Sir, your last logged focus session was **${daysSinceLast} days ago**. I'm not asking what happened — I'm asking what's next. Even 25 minutes today breaks the drift. Want to start one now?`;
 }
 
+// ===== Proactive Commitment Tracker =====
+export function logCommitment(text) {
+  const lower = text.toLowerCase();
+  const commitPhrases = ['i will', "i'll", 'i am going to', "i'm going to", 'tomorrow i', 'this week i', 'my plan is'];
+  if (!commitPhrases.some(p => lower.includes(p))) return false;
+
+  const commitments = JSON.parse(localStorage.getItem('jarvis_commitments') || '[]');
+  commitments.push({ text, date: Date.now(), resolved: false, mentioned: false });
+  localStorage.setItem('jarvis_commitments', JSON.stringify(commitments));
+  return true;
+}
+
+export function checkUnresolvedCommitments() {
+  if (!shouldFire('unresolved_commitment', 24)) return null;
+  const commitments = JSON.parse(localStorage.getItem('jarvis_commitments') || '[]');
+  const now = Date.now();
+  
+  // Find a commitment older than 24h, not resolved, not mentioned
+  const pending = commitments.find(c => !c.resolved && !c.mentioned && (now - c.date > 86400000));
+  if (!pending) return null;
+
+  pending.mentioned = true;
+  localStorage.setItem('jarvis_commitments', JSON.stringify(commitments));
+  
+  recordFired('unresolved_commitment');
+  
+  const daysAgo = Math.floor((now - pending.date) / 86400000);
+  const timeStr = daysAgo === 1 ? 'yesterday' : `${daysAgo} days ago`;
+  return `Sir, ${timeStr} you said: "${pending.text}". I'm just checking in — did you follow through, or is it still pending?`;
+}
+
 // ===== Run all pattern checks (call every 5 min from proactive loop) =====
 export async function runPatternChecks() {
   const results = [];
@@ -137,6 +168,8 @@ export async function runPatternChecks() {
   if (inconsistency) results.push({ type: 'inconsistency', message: inconsistency, severity: 3 });
   const focusDrop = checkFocusDrop();
   if (focusDrop) results.push({ type: 'focus_drop', message: focusDrop, severity: 1 });
+  const commitment = checkUnresolvedCommitments();
+  if (commitment) results.push({ type: 'unresolved_commitment', message: commitment, severity: 1 });
   return results;
 }
 

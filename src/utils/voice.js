@@ -1,6 +1,9 @@
 // JARVIS Voice Engine — Microsoft Neural TTS (free, no API key)
 // Uses Edge Read Aloud neural voices served from local /api/tts
 
+import { Capacitor, registerPlugin } from '@capacitor/core';
+const JarvisNative = registerPlugin('JarvisNative');
+
 let audioCtx = null;
 let sourceNode = null;
 let _userInteracted = false;
@@ -66,9 +69,9 @@ async function speakNeural(text, onStart, onEnd) {
 
     const settings = getVoiceSettings();
     const config = {
-      pitch: settings.pitch !== undefined ? settings.pitch : -2,
-      rate:  settings.rate  !== undefined ? settings.rate  : -5,
-      bass:  settings.bass  !== undefined ? settings.bass  : 3,
+      pitch: settings.pitch !== undefined ? settings.pitch : 0,
+      rate:  settings.rate  !== undefined ? settings.rate  : 0,
+      bass:  settings.bass  !== undefined ? settings.bass  : 0,
     };
 
     onStart?.();
@@ -117,7 +120,7 @@ async function speakNeural(text, onStart, onEnd) {
     const bassBoost = ctx.createBiquadFilter();
     bassBoost.type = 'lowshelf';
     bassBoost.frequency.value = 200;
-    bassBoost.gain.value = config.bass;  // +3dB default
+    bassBoost.gain.value = config.bass;  // 0dB default
 
     // 3. Subtle compression — evens dynamics, adds density
     const compressor = ctx.createDynamicsCompressor();
@@ -184,12 +187,31 @@ function speakBrowser(text, onStart, onEnd) {
 }
 
 // ===== Main speak function =====
-export function speak(text, onStart, onEnd) {
+export async function speak(text, onStart, onEnd) {
+  const cleanText = cleanForSpeech(text);
+  if (!cleanText) { onEnd?.(); return; }
+
+  if (Capacitor.isNativePlatform()) {
+    onStart?.();
+    try {
+      await JarvisNative.speakText({ text: cleanText });
+      const durationEstimate = cleanText.split(' ').length * 350;
+      setTimeout(() => onEnd?.(), durationEstimate);
+    } catch (e) {
+      console.warn('Native TTS failed:', e);
+      speakNeural(text, onStart, onEnd);
+    }
+    return;
+  }
+
   speakNeural(text, onStart, onEnd);
 }
 
 // ===== Stop speech =====
 export function stopSpeaking() {
+  if (Capacitor.isNativePlatform()) {
+    JarvisNative.stopSpeaking().catch(()=>{});
+  }
   window.speechSynthesis?.cancel();
   if (sourceNode) {
     try { sourceNode.onended = null; sourceNode.stop(); } catch {}

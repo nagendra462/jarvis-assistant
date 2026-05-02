@@ -1,18 +1,20 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { processCommand, getGoals, addGoal, saveStreak, buildAIContext, TASK_COMPLETE_RESPONSES, pickRandom, formatTime, formatDate } from './utils/jarvis-brain';
-import { streamChat, restoreHistory, setUserModelContext } from './utils/gemini';
-import { speak as jarvisSpeak, stopSpeaking, preloadVoices, markUserInteraction } from './utils/voice';
-import { syncSave } from './utils/sync';
-import { runProactiveChecks, generateBriefing, addReminder, syncProfileFromMemories } from './utils/proactive';
-import { playWakeSound, playReminderSound, playAlarmSound, stopAlarmSound, playFocusCompleteSound, resumeAudio } from './utils/sounds';
-import { addHabit, checkInHabit, getHabitReport, setSleepSchedule, checkSleepSchedule } from './utils/habits';
-import { loadUserModel, syncModelFromMemories, getModelContext } from './utils/memory';
-import { isMorningRitualDue, isEveningDebriefDue } from './utils/rituals';
+import { stopSpeaking, markUserInteraction } from './utils/voice';
+import { stopAlarmSound, playWakeSound, playFocusCompleteSound, resumeAudio } from './utils/sounds';
 import { logFocusSession } from './utils/analytics';
-import { runPatternChecks, isWeeklyReportDue } from './utils/patterns';
-import { detectURL, fetchAndSummarize, formatReadingLog } from './utils/reader';
-import { logStudySession, addSkill as addNewSkill } from './utils/skills';
-import { updateTodayJournal, getTodayJournal } from './utils/journal';
+import { getTodayJournal, updateTodayJournal } from './utils/journal';
+import { isWeeklyReportDue } from './utils/patterns';
+import { registerPlugin, Capacitor } from '@capacitor/core';
+import { streamChat } from './utils/gemini';
+import { buildAIContext } from './utils/jarvis-brain';
+
+// --- Hooks ---
+import { useJarvisChat } from './hooks/useJarvisChat';
+import { useWakeWord } from './hooks/useWakeWord';
+import { useJarvisLifecycle } from './hooks/useJarvisLifecycle';
+import { useJarvisActions } from './hooks/useJarvisActions';
+
+// --- Components ---
 import HUD from './components/HUD';
 import FocusOverlay from './components/FocusOverlay';
 import GoalsOverlay from './components/GoalsOverlay';
@@ -21,11 +23,18 @@ import SkillsPanel from './components/SkillsPanel';
 import JournalPanel from './components/JournalPanel';
 import AnalyticsDashboard from './components/AnalyticsDashboard';
 import WeeklyReport from './components/WeeklyReport';
-import MorningRitual from './components/MorningRitual';
-import EveningDebrief from './components/EveningDebrief';
 
+const JarvisNative = registerPlugin('JarvisNative');
 
-// ===== Particles Background =====
+// ===== Tiny presentational components (no state, no side-effects) =====
+function renderMarkdown(text) {
+  if (!text) return '';
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/\n/g, '<br/>');
+}
+
 function ParticlesCanvas() {
   const canvasRef = useRef(null);
   useEffect(() => {
@@ -69,20 +78,10 @@ function ParticlesCanvas() {
   return <canvas ref={canvasRef} className="particles-canvas" />;
 }
 
-// ===== Markdown Renderer =====
-function renderMarkdown(text) {
-  if (!text) return '';
-  return text
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/\n/g, '<br/>');
-}
-
-// ===== Arc Reactor Orb =====
-function ArcReactor({ state }) {
+function ArcReactor({ state, onClick }) {
   const labels = { idle: 'Online', listening: 'Listening', thinking: 'Processing', speaking: 'Speaking' };
   return (
-    <div className="orb-container">
+    <div className="orb-container" onClick={onClick} style={{ cursor: 'pointer' }} title="Click to interrupt JARVIS">
       <div className={`orb ${state}`}>
         <div className="orb-ring ring-1" /><div className="orb-ring ring-2" />
         <div className="orb-ring ring-3" /><div className="orb-core" />
@@ -92,7 +91,6 @@ function ArcReactor({ state }) {
   );
 }
 
-// ===== Chat Message =====
 function ChatMessage({ msg }) {
   return (
     <div className={`msg ${msg.sender}`}>
@@ -106,364 +104,89 @@ function TypingIndicator() {
   return <div className="typing-indicator"><div className="typing-dot" /><div className="typing-dot" /><div className="typing-dot" /></div>;
 }
 
-// ===== Widget Bar =====
-const WIDGETS = [
-  { icon: '🕐', label: 'Time', cmd: 'what time is it' },
-  { icon: '🎯', label: 'Goals', cmd: 'show my goals' },
-  { icon: '⏱️', label: 'Focus', cmd: 'start focus' },
-  { icon: '🔥', label: 'Motivate', cmd: 'motivate me' },
-  { icon: '📚', label: 'Skills', cmd: 'show skills' },
-  { icon: '📖', label: 'Journal', cmd: 'show journal' },
-  { icon: '📊', label: 'Analytics', cmd: 'show analytics' },
-  { icon: '🌅', label: 'Morning', cmd: 'morning ritual' },
-  { icon: '🌙', label: 'Evening', cmd: 'evening debrief' },
-  { icon: '📝', label: 'Notes', cmd: 'show my notes' },
-  { icon: '🗑️', label: 'Clear', action: 'clear' },
-];
-
-function WidgetBar({ onCommand, onClear }) {
-  return (
-    <div className="widgets">
-      {WIDGETS.map((w, i) => (
-        <button key={i} className="widget-btn" onClick={() => w.action === 'clear' ? onClear() : onCommand(w.cmd)}>
-          <span className="widget-icon">{w.icon}</span>
-          <span className="widget-label">{w.label}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-// ===== Goal carry-forward =====
-function carryForwardGoals() {
-  const today = new Date().toDateString();
-  try {
-    const data = JSON.parse(localStorage.getItem('jarvis_goals') || '{}');
-    if (!data.date || data.date === today) return; // already today
-    const incomplete = (data.items || []).filter(g => !g.done);
-    if (incomplete.length === 0) return;
-    const newGoals = {
-      date: today,
-      items: incomplete.map(g => ({ ...g, carried: true, done: false })),
-    };
-    localStorage.setItem('jarvis_goals', JSON.stringify(newGoals));
-    return incomplete.length;
-  } catch { return 0; }
-}
-
 // ===== Main App =====
 export default function App() {
-  const [messages, setMessages] = useState(() => {
-    try {
-      const saved = localStorage.getItem('jarvis_chat_history');
-      return saved ? JSON.parse(saved) : [];
-    } catch { return []; }
-  });
   const [inputText, setInputText] = useState('');
-  const [orbState, setOrbState] = useState('idle');
-  const [isTyping, setIsTyping] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [wakeWordActive, setWakeWordActive] = useState(false);
   const [showGoals, setShowGoals] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [focusMode, setFocusMode] = useState(null);
   const [focusPaused, setFocusPaused] = useState(false);
+  const [focusStartTime, setFocusStartTime] = useState(null);
   const [showSkills, setShowSkills] = useState(false);
   const [showJournal, setShowJournal] = useState(false);
   const [showAnalytics, setShowAnalytics] = useState(false);
   const [showWeeklyReport, setShowWeeklyReport] = useState(false);
-  const [showMorningRitual, setShowMorningRitual] = useState(false);
-  const [showEveningDebrief, setShowEveningDebrief] = useState(false);
-  const [focusStartTime, setFocusStartTime] = useState(null);
-
-  const chatEndRef = useRef(null);
   const inputRef = useRef(null);
-  const recognitionRef = useRef(null);
-  const wakeListeningRef = useRef(false);
-  const activeListeningRef = useRef(false);
-  const autoResumeTimerRef = useRef(null);
-  const wakeHealthRef = useRef(null);
 
+  // --- Core chat state & speakResponse ---
+  const {
+    messages, setMessages, orbState, setOrbState,
+    isTyping, setIsTyping, chatEndRef,
+    addJarvisMessage, addUserMessage, speakResponse, stopResponse,
+  } = useJarvisChat();
 
-  // ===== Helpers =====
-  const addJarvisMessage = useCallback((text) => {
-    setMessages(prev => [...prev, { sender: 'jarvis', text, id: Date.now() }]);
-  }, []);
+  // --- Action dispatcher ---
+  const { executeActions } = useJarvisActions({
+    addJarvisMessage, speakResponse,
+    setFocusMode, setFocusPaused, setFocusStartTime,
+    setShowGoals, setShowSettings, setShowSkills,
+    setShowJournal, setShowAnalytics, setShowWeeklyReport,
+  });
 
-  const addUserMessage = useCallback((text) => {
-    setMessages(prev => [...prev, { sender: 'user', text, id: Date.now() }]);
-  }, []);
-
-  // ===== Scroll to bottom =====
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isTyping]);
-
-  // ===== Persist chat history =====
-  useEffect(() => {
-    const toSave = messages.map(m => ({ ...m, streaming: false })).slice(-100);
-    localStorage.setItem('jarvis_chat_history', JSON.stringify(toSave));
-  }, [messages]);
-
-  // ===== Initialization =====
-  useEffect(() => {
-    preloadVoices();
-    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-    try {
-      const saved = JSON.parse(localStorage.getItem('jarvis_chat_history') || '[]');
-      restoreHistory(saved.slice(-20));
-    } catch {}
-    const carried = carryForwardGoals();
-    if (carried > 0) {
-      setTimeout(() => {
-        addJarvisMessage(`↩ I've carried forward **${carried} unfinished goal${carried > 1 ? 's' : ''}** from yesterday, sir. Let's finish what we started.`);
-      }, 1200);
-    }
-    saveStreak();
-    syncProfileFromMemories();
-
-    (async () => {
-      try {
-        await syncModelFromMemories();
-        const modelCtx = await getModelContext();
-        setUserModelContext(modelCtx);
-      } catch {}
-
-      const lastBriefing = localStorage.getItem('jarvis_last_briefing_date');
-      const today = new Date().toDateString();
-      if (lastBriefing !== today) {
-        const briefing = generateBriefing();
-        setTimeout(() => {
-          addJarvisMessage(briefing);
-          // Don't auto-speak on startup — AudioContext needs a user gesture first.
-          // JARVIS will speak as soon as they type or click anything.
-          localStorage.setItem('jarvis_last_briefing_date', today);
-        }, 800);
-      }
-
-      try {
-        const morningDue = await isMorningRitualDue();
-        if (morningDue) setTimeout(() => setShowMorningRitual(true), 1800);
-      } catch {}
-    })();
-  }, []); // eslint-disable-line
-
-  // ===== Auto-briefing on tab return (Feature #3) =====
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState !== 'visible') return;
-      const lastBriefing = localStorage.getItem('jarvis_last_briefing_date');
-      const today = new Date().toDateString();
-      const lastActiveStr = localStorage.getItem('jarvis_last_active_ts');
-      const lastActive = lastActiveStr ? parseInt(lastActiveStr) : 0;
-      const hoursSinceActive = (Date.now() - lastActive) / 3600000;
-
-      // Trigger fresh briefing if: new day OR been away 8+ hours
-      if (lastBriefing !== today || hoursSinceActive >= 8) {
-        const briefing = generateBriefing();
-        addJarvisMessage(briefing);
-        speakResponse(briefing);
-        localStorage.setItem('jarvis_last_briefing_date', today);
-      }
-      localStorage.setItem('jarvis_last_active_ts', String(Date.now()));
-    };
-
-    // Track when we go hidden
-    const onHidden = () => {
-      if (document.visibilityState === 'hidden') {
-        localStorage.setItem('jarvis_last_active_ts', String(Date.now()));
-      }
-    };
-
-    document.addEventListener('visibilitychange', () => {
-      onVisible();
-      onHidden();
-    });
-    localStorage.setItem('jarvis_last_active_ts', String(Date.now()));
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, []); // eslint-disable-line
-
-  // ===== Proactive check-ins every 5 min =====
-  useEffect(() => {
-    const interval = setInterval(async () => {
-      const { reminders, checkIn } = runProactiveChecks();
-      for (const r of reminders) {
-        playReminderSound();
-        const msg = `⏰ **Reminder**, sir: ${r.text}`;
-        addJarvisMessage(msg); speakResponse(msg);
-      }
-      if (checkIn) { addJarvisMessage(checkIn); speakResponse(checkIn); }
-      const sleep = checkSleepSchedule();
-      if (sleep.sleepReminder) { playReminderSound(); addJarvisMessage(sleep.sleepReminder); speakResponse(sleep.sleepReminder); }
-      if (sleep.wakeAlarm) { playAlarmSound(); addJarvisMessage(sleep.wakeAlarm); speakResponse(sleep.wakeAlarm); }
-
-      // Pattern checks
-      try {
-        const patterns = await runPatternChecks();
-        for (const p of patterns) { playReminderSound(); addJarvisMessage(p.message); speakResponse(p.message); }
-      } catch {}
-
-      // Evening debrief check
-      try {
-        const eveningDue = await isEveningDebriefDue();
-        if (eveningDue) setShowEveningDebrief(true);
-      } catch {}
-
-      // Weekly report (Sunday 8pm+)
-      if (isWeeklyReportDue()) setShowWeeklyReport(true);
-
-      // Refresh model context
-      try { const ctx = await getModelContext(); setUserModelContext(ctx); } catch {}
-    }, 5 * 60 * 1000);
-    return () => clearInterval(interval);
-  }, []); // eslint-disable-line
-
-  // ===== Cmd+K / Ctrl+K shortcut to focus input (Feature #6) =====
-  useEffect(() => {
-    const onKey = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        e.preventDefault();
-        inputRef.current?.focus();
-        inputRef.current?.select();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
-  // ===== Speech Recognition — resilient wake word (Feature #4) =====
-  useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-
-    let restartAttempts = 0;
-
-    const safeStart = () => {
-      if (!wakeListeningRef.current) return;
-      try { recognition.start(); restartAttempts = 0; } catch {
-        // Already running — ignore
-      }
-    };
-
-    recognition.onresult = (event) => {
-      const lastResult = event.results[event.results.length - 1];
-      const transcript = lastResult[0].transcript.trim();
-      if (activeListeningRef.current && lastResult.isFinal) {
-        activeListeningRef.current = false;
-        setIsListening(false);
-        setOrbState('idle');
-        const cleaned = transcript.replace(/^(hey\s+)?jarvis\s*/i, '').trim();
-        if (cleaned.length > 0) handleCommand(cleaned);
-        return;
-      }
-      if (wakeListeningRef.current && !activeListeningRef.current) {
-        const lower = transcript.toLowerCase();
-        if (lower.includes('jarvis')) {
-          playWakeSound();
-          const afterWake = lower.split(/jarvis\s*/i).pop().trim();
-          if (lastResult.isFinal && afterWake.length > 2) {
-            activeListeningRef.current = false;
-            setIsListening(false); setOrbState('idle');
-            handleCommand(afterWake);
-          } else {
-            activeListeningRef.current = true;
-            setIsListening(true); setOrbState('listening');
-          }
-        }
-      }
-    };
-
-    recognition.onerror = (e) => {
-      if (e.error === 'no-speech' || e.error === 'aborted') {
-        if (wakeListeningRef.current) {
-          activeListeningRef.current = false; setIsListening(false);
-          // Exponential backoff
-          const delay = Math.min(300 * Math.pow(2, restartAttempts), 5000);
-          restartAttempts++;
-          setTimeout(safeStart, delay);
-        }
-        return;
-      }
-      activeListeningRef.current = false; setIsListening(false); setOrbState('idle');
-    };
-
-    recognition.onend = () => {
-      activeListeningRef.current = false; setIsListening(false);
-      if (wakeListeningRef.current) setTimeout(safeStart, 300);
-      else setOrbState('idle');
-    };
-
-    recognitionRef.current = recognition;
-
-    // Health-check: if wake mode is on but recognition silently died, restart it
-    wakeHealthRef.current = setInterval(() => {
-      if (wakeListeningRef.current) {
-        try { recognition.start(); } catch { /* already running, that's fine */ }
-      }
-    }, 30000);
-
-    return () => clearInterval(wakeHealthRef.current);
-  }, []); // eslint-disable-line
-
-  // ===== speakResponse =====
-  function speakResponse(text) {
-    jarvisSpeak(text, () => setOrbState('speaking'), () => {
-      setOrbState('idle');
-      if (wakeListeningRef.current && recognitionRef.current) {
-        activeListeningRef.current = true; setIsListening(true); setOrbState('listening');
-        clearTimeout(autoResumeTimerRef.current);
-        autoResumeTimerRef.current = setTimeout(() => {
-          activeListeningRef.current = false; setIsListening(false); setOrbState('idle');
-        }, 6000);
-      }
-    });
-  }
-
-  // ===== Main command handler =====
-  const handleCommand = useCallback(async (text) => {
+  // --- Main command handler (defined before lifecycle so it can be passed in) ---
+  const handleCommand = useCallback(async (text, isSilent = false) => {
     if (!text.trim()) return;
     stopSpeaking(); stopAlarmSound(); setOrbState('idle');
-    addUserMessage(text);
+    if (!isSilent) addUserMessage(text);
     setIsTyping(true); setOrbState('thinking');
+
+    const { detectEmotionalTone, buildEmotionalContext, updateSessionMood, extractMentionedPeople } = await import('./utils/emotion');
+    const { setEmotionalContext } = await import('./utils/gemini');
+    const { searchSemanticMemory, storeSemanticMemory } = await import('./utils/rag');
+    const { logCommitment } = await import('./utils/patterns');
+    const { logSignificantExchange, trackRelationship } = await import('./utils/memory');
+    const { processCommand } = await import('./utils/jarvis-brain');
+    const { formatReadingLog, fetchAndSummarize, detectURL } = await import('./utils/reader');
+
+    const tone = detectEmotionalTone(text);
+    updateSessionMood(tone);
+    const pastContext = await searchSemanticMemory(text, 2);
+    const deepMemory = pastContext.length > 0
+      ? '\n\n[DEEP MEMORY]:\n' + pastContext.map(p => `- (${new Date(p.timestamp).toLocaleDateString()}): ${p.text}`).join('\n')
+      : '';
+    setEmotionalContext(buildEmotionalContext(tone) + deepMemory);
 
     const response = await processCommand(text);
     setIsTyping(false);
 
+    const processExchange = (jarvisText) => {
+      logCommitment(text);
+      if (text.length > 20 || jarvisText.length > 30) {
+        logSignificantExchange(text, jarvisText).catch(() => {});
+        storeSemanticMemory(`User: "${text}" | JARVIS: "${jarvisText}"`).catch(() => {});
+      }
+      extractMentionedPeople(text).forEach(p => trackRelationship(p, 'Contact', text).catch(() => {}));
+    };
+
     if (response.type === 'goals_ui') { setShowGoals(true); setOrbState('idle'); return; }
     if (response.type === 'focus') {
-      const match = response.text.match(/__FOCUS_START_(\d+)__/);
-      const mins = match ? parseInt(match[1]) : 25;
-      setFocusMode({ minutes: mins }); setFocusPaused(false);
-      setFocusStartTime(new Date().toISOString());
+      const mins = parseInt((response.text.match(/__FOCUS_START_(\d+)__/) || [])[1]) || 25;
+      setFocusMode({ minutes: mins }); setFocusPaused(false); setFocusStartTime(new Date().toISOString());
       const msg = `Focus mode activated for **${mins} minutes**, sir. All distractions eliminated.`;
       addJarvisMessage(msg); speakResponse(msg); return;
     }
-    if (response.type === 'focus_stop') {
-      setFocusMode(null);
-      const msg = 'Focus session ended, sir. Well done.';
-      addJarvisMessage(msg); speakResponse(msg); return;
-    }
+    if (response.type === 'focus_stop') { setFocusMode(null); const msg = 'Focus session ended, sir. Well done.'; addJarvisMessage(msg); speakResponse(msg); return; }
     if (response.type === 'settings') { setShowSettings(true); return; }
     if (response.type === 'skills_ui') { setShowSkills(true); setOrbState('idle'); return; }
     if (response.type === 'journal_ui') { setShowJournal(true); setOrbState('idle'); return; }
     if (response.type === 'analytics_ui') { setShowAnalytics(true); setOrbState('idle'); return; }
     if (response.type === 'weekly_report_ui') { setShowWeeklyReport(true); setOrbState('idle'); return; }
-    if (response.type === 'morning_ritual') { setShowMorningRitual(true); setOrbState('idle'); return; }
-    if (response.type === 'evening_debrief') { setShowEveningDebrief(true); setOrbState('idle'); return; }
-    if (response.type === 'reading_log_ui') {
-      setIsTyping(false); setOrbState('idle');
-      addJarvisMessage(formatReadingLog()); return;
-    }
+    if (response.type === 'reading_log_ui') { setOrbState('idle'); addJarvisMessage(formatReadingLog()); return; }
     if (response.type === 'read_url') {
-      setIsTyping(false); setOrbState('thinking');
-      const url = detectURL(response.raw || text);
+      setOrbState('thinking');
+      const url = (text.match(/https?:\/\/[^\s]+/) || [])[0];
       if (url) {
         addJarvisMessage('Reading that for you, sir. One moment...');
         const result = await fetchAndSummarize(url, streamChat);
@@ -473,22 +196,8 @@ export default function App() {
       }
       return;
     }
-    if (response.type === 'skill_log_natural' || response.type === 'skill_add_natural') {
-      setIsTyping(true); setOrbState('thinking');
-      const streamMsgId = Date.now();
-      setMessages(prev => [...prev, { sender: 'jarvis', text: '', id: streamMsgId, streaming: true }]);
-      let streamed = '';
-      const finalResult = await streamChat(text, buildAIContext(), (chunk) => {
-        streamed += chunk;
-        setMessages(prev => prev.map(m => m.id === streamMsgId ? { ...m, text: streamed } : m));
-      });
-      setIsTyping(false);
-      setMessages(prev => prev.map(m => m.id === streamMsgId ? { ...m, text: finalResult.text, streaming: false } : m));
-      if (finalResult.actions?.length > 0) executeActions(finalResult.actions);
-      speakResponse(finalResult.text); return;
-    }
 
-    if (response.type === 'ai_needed') {
+    if (response.type === 'skill_log_natural' || response.type === 'skill_add_natural' || response.type === 'ai_needed') {
       const streamMsgId = Date.now();
       setMessages(prev => [...prev, { sender: 'jarvis', text: '', id: streamMsgId, streaming: true }]);
       setOrbState('thinking');
@@ -501,148 +210,92 @@ export default function App() {
       });
       setMessages(prev => prev.map(m => m.id === streamMsgId ? { ...m, text: finalResult.text, streaming: false } : m));
       if (finalResult.actions?.length > 0) executeActions(finalResult.actions);
+      processExchange(finalResult.text);
       speakResponse(finalResult.text); return;
     }
 
     if (response.actions?.length > 0) executeActions(response.actions);
+    processExchange(response.text);
     addJarvisMessage(response.text);
     speakResponse(response.text);
-  }, []); // eslint-disable-line
+  }, [focusMode, focusPaused, focusStartTime, addJarvisMessage, addUserMessage, speakResponse, setIsTyping, setOrbState, setMessages, executeActions, setFocusMode, setFocusPaused, setFocusStartTime, setShowGoals, setShowSkills, setShowJournal, setShowAnalytics, setShowWeeklyReport, setShowSettings]);
 
-  // ===== Action executor =====
-  function executeActions(actions) {
-    for (const action of actions) {
-      switch (action.type) {
-        case 'FOCUS_START': setFocusMode({ minutes: parseInt(action.value) || 25 }); setFocusPaused(false); setFocusStartTime(new Date().toISOString()); break;
-        case 'FOCUS_STOP': setFocusMode(null); break;
-        case 'GOALS_SHOW': setShowGoals(true); break;
-        case 'GOAL_ADD': if (action.value) addGoal(action.value); break;
-        case 'NOTE_ADD': {
-          if (action.value) {
-            const notes = JSON.parse(localStorage.getItem('jarvis_notes') || '[]');
-            notes.push({ text: action.value, created: Date.now() });
-            localStorage.setItem('jarvis_notes', JSON.stringify(notes));
-          }
-          break;
-        }
-        case 'NOTES_SHOW': {
-          const notes = JSON.parse(localStorage.getItem('jarvis_notes') || '[]');
-          if (notes.length > 0) {
-            let notesList = `📝 **Your Notes** (${notes.length}):\n\n`;
-            notes.forEach((n, i) => { notesList += `**${i + 1}.** ${n.text}\n`; });
-            addJarvisMessage(notesList);
-          }
-          break;
-        }
-        case 'REMINDER_SET': {
-          const parts = action.value.split('|');
-          const reminderText = parts[0]?.trim();
-          const mins = parseInt(parts[1]) || 30;
-          if (reminderText) addReminder(reminderText, mins);
-          break;
-        }
-        case 'SEARCH': if (action.value) window.open(`https://www.google.com/search?q=${encodeURIComponent(action.value)}`, '_blank'); break;
-        case 'HABIT_ADD': if (action.value) { const r = addHabit(action.value); if (!r) addJarvisMessage(`Already tracking **${action.value}**, sir.`); } break;
-        case 'HABIT_CHECK': if (action.value) { const r = checkInHabit(action.value); if (r?.alreadyDone) addJarvisMessage(`Already checked in **${action.value}** today, sir. 💪`); } break;
-        case 'HABIT_REPORT': { const rpt = getHabitReport(); if (rpt) addJarvisMessage(rpt); break; }
-        case 'SLEEP_SET': if (action.value) setSleepSchedule({ bedtime: action.value }); break;
-        case 'WAKE_SET': if (action.value) setSleepSchedule({ wakeTime: action.value }); break;
-        case 'OPEN_URL': if (action.value) { let url = action.value; if (!url.startsWith('http')) url = 'https://' + url; window.open(url, '_blank'); } break;
-        case 'COPY': if (action.value) { navigator.clipboard.writeText(action.value).catch(() => {}); addJarvisMessage('Copied to clipboard, sir.'); } break;
-        case 'SETTINGS': setShowSettings(true); break;
-        case 'SKILLS_SHOW': setShowSkills(true); break;
-        case 'SKILL_ADD': {
-          if (action.value) {
-            const [name, cat, topicsStr] = action.value.split('|');
-            const topics = topicsStr ? topicsStr.split(',').map(t => t.trim()).filter(Boolean) : [];
-            if (name?.trim()) {
-              const res = addNewSkill(name.trim(), cat?.trim() || 'General', topics);
-              addJarvisMessage(res ? `✅ Tracking **${name.trim()}** now, sir.` : `Already tracking **${name.trim()}**, sir.`);
-            }
-          }
-          break;
-        }
-        case 'SKILL_LOG': {
-          if (action.value) {
-            const [skillName, mins, topicName] = action.value.split('|');
-            if (skillName?.trim()) {
-              const res = logStudySession(skillName.trim(), parseInt(mins) || 30, topicName?.trim() || null);
-              if (res) {
-                let msg = `✅ Logged **${mins || 30} min** on **${skillName.trim()}**${topicName ? ` — ${topicName}` : ''}.`;
-                if (res.newMilestone) msg += `\n🏆 **Milestone!** ${res.newMilestone.description}`;
-                addJarvisMessage(msg);
-                updateTodayJournal({ lastStudySkill: skillName.trim() }).catch(() => {});
-              } else { addJarvisMessage(`Couldn't find skill "${skillName}", sir. Add it first via the Skills panel.`); }
-            }
-          }
-          break;
-        }
-        case 'JOURNAL_SHOW': setShowJournal(true); break;
-        case 'ANALYTICS_SHOW': setShowAnalytics(true); break;
-        case 'WEEKLY_REPORT': setShowWeeklyReport(true); break;
-        case 'READING_SHOW': addJarvisMessage(formatReadingLog()); break;
-        case 'MORNING_RITUAL': setShowMorningRitual(true); break;
-        case 'EVENING_DEBRIEF': setShowEveningDebrief(true); break;
-      }
-    }
-  }
+  // --- Lifecycle: startup, visibility, polling ---
+  useJarvisLifecycle({ addJarvisMessage, speakResponse, setShowWeeklyReport, handleCommand });
 
-  // ===== Focus complete =====
+  // --- Wake word ---
+  const { toggleMic, resumeListeningAfterSpeak } = useWakeWord({
+    onCommand: handleCommand, setIsListening, setOrbState, setWakeWordActive,
+  });
+
+  // --- Native background command listener ---
+  useEffect(() => {
+    if (!window.Capacitor?.isNativePlatform()) return;
+    const listener = JarvisNative.addListener('onCommandDetected', (data) => {
+      if (data?.command) handleCommand(data.command);
+    });
+    return () => { listener.then(l => l.remove()).catch(() => {}); };
+  }, [handleCommand]);
+
+  // --- Focus distraction polling ---
+  useEffect(() => {
+    if (!focusMode || focusPaused) return;
+    const interval = setInterval(async () => {
+      try {
+        if (!window.Capacitor?.isNativePlatform()) return;
+        const { packageName = '' } = await JarvisNative.getForegroundApp();
+        const distractions = ['com.instagram.android', 'com.twitter.android', 'com.google.android.youtube', 'com.zhiliaoapp.musically', 'com.facebook.katana'];
+        if (distractions.includes(packageName)) {
+          const msg = 'Sir, close that app and return to deep work. Your focus session is still active.';
+          addJarvisMessage(msg);
+          import('./utils/voice').then(({ speak }) => speak(msg, () => setOrbState('speaking'), () => setOrbState('idle')));
+        }
+      } catch {}
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [focusMode, focusPaused, addJarvisMessage]);
+
+  // --- Cmd+K shortcut ---
+  useEffect(() => {
+    const onKey = (e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); inputRef.current?.focus(); inputRef.current?.select(); } };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // --- Focus complete handler ---
   async function handleFocusStop(completed) {
     const endedAt = new Date().toISOString();
     const plannedMins = focusMode?.minutes || 25;
     const startedAt = focusStartTime || new Date(Date.now() - plannedMins * 60000).toISOString();
     const actualMins = Math.round((new Date(endedAt) - new Date(startedAt)) / 60000);
-    const sessionEntry = logFocusSession({ startedAt, plannedMinutes: plannedMins, actualMinutes: Math.min(actualMins, plannedMins), completed });
-    // Append session to today's journal (read-then-write to avoid wiping array)
+    logFocusSession({ startedAt, plannedMinutes: plannedMins, actualMinutes: Math.min(actualMins, plannedMins), completed });
     try {
       const existing = await getTodayJournal();
-      const sessions = [...(existing.focusSessions || []), {
-        startedAt, endedAt, plannedMinutes: plannedMins,
-        actualMinutes: Math.min(actualMins, plannedMins), completed,
-      }];
+      const sessions = [...(existing.focusSessions || []), { startedAt, endedAt, plannedMinutes: plannedMins, actualMinutes: Math.min(actualMins, plannedMins), completed }];
       updateTodayJournal({ focusSessions: sessions }).catch(() => {});
     } catch {}
     setFocusMode(null); setFocusPaused(false); setFocusStartTime(null);
     if (completed) {
       await resumeAudio();
       playFocusCompleteSound();
-      if (Notification.permission === 'granted') {
-        new Notification('⏱️ JARVIS — Focus Complete', {
-          body: 'Outstanding, sir. Your session is complete. Time to recover.',
-          silent: false,
-        });
-      }
-      const announcement = 'Outstanding work, sir. Your focus session is complete. You have just outworked 99 percent of people on this planet. Take a moment, breathe, and tell me when you are ready to go again.';
-      const chatMsg = '🏆 **Focus session complete!** Outstanding discipline, sir. You\'ve just outworked 99% of people. Shall we go again?';
-      addJarvisMessage(chatMsg);
-      setTimeout(() => speakResponse(announcement), 2700);
+      if (Notification.permission === 'granted') new Notification('⏱️ JARVIS — Focus Complete', { body: 'Outstanding, sir. Your session is complete.' });
+      const msg = 'Outstanding work, sir. Your focus session is complete. You have just outworked 99 percent of people. Take a moment, breathe, and tell me when you are ready to go again.';
+      addJarvisMessage('🏆 **Focus session complete!** Outstanding discipline, sir. Shall we go again?');
+      setTimeout(() => speakResponse(msg), 2700);
     } else {
       const msg = 'Focus session ended early, sir. Every minute of deep work compounds. Remember that.';
       addJarvisMessage(msg); speakResponse(msg);
     }
   }
 
-  // ===== Mic toggle =====
+  // --- Mic toggle ---
   function handleMic() {
-    if (!recognitionRef.current) {
+    if (!toggleMic()) {
       addJarvisMessage('Voice recognition isn\'t available in this browser, sir. Please use Chrome.');
       return;
     }
-    if (wakeListeningRef.current) {
-      wakeListeningRef.current = false; activeListeningRef.current = false;
-      setWakeWordActive(false); setIsListening(false); setOrbState('idle');
-      try { recognitionRef.current.stop(); } catch {}
-      addJarvisMessage('Voice mode deactivated, sir. Type or click the mic to reach me.');
-    } else {
-      wakeListeningRef.current = true; setWakeWordActive(true); setOrbState('idle');
-      try { recognitionRef.current.start(); } catch {
-        try { recognitionRef.current.stop(); } catch {}
-        setTimeout(() => { try { recognitionRef.current.start(); } catch {} }, 300);
-      }
-      addJarvisMessage('Voice mode activated, sir. Say **"JARVIS"** and I\'m all ears.');
-      speakResponse('Voice mode activated, sir.');
-    }
+    if (window.Capacitor?.isNativePlatform()) JarvisNative.startBackgroundService().catch(() => {});
+    playWakeSound();
   }
 
   function handleSend() {
@@ -652,21 +305,26 @@ export default function App() {
     inputRef.current?.focus();
   }
 
-  // Mark user interaction on first click or keypress anywhere — unlocks AudioContext
   const handleFirstInteraction = useCallback(() => {
     markUserInteraction();
-  }, []);
+    if (window.__pendingStartupSpeech) {
+      const speech = window.__pendingStartupSpeech;
+      window.__pendingStartupSpeech = null;
+      setTimeout(() => speakResponse(speech), 300);
+    }
+  }, [speakResponse]);
 
   return (
-    <div
-      onClickCapture={handleFirstInteraction}
-      onKeyDownCapture={handleFirstInteraction}
-      style={{ display: 'contents' }}
-    >
+    <div onClickCapture={handleFirstInteraction} onKeyDownCapture={handleFirstInteraction} style={{ display: 'contents' }}>
       <ParticlesCanvas />
       <HUD onSettingsClick={() => setShowSettings(true)} wakeWordActive={wakeWordActive} />
       <main className="app-main">
-        <ArcReactor state={orbState} />
+        <ArcReactor
+          state={orbState}
+          onClick={() => {
+            if (orbState === 'speaking') { stopSpeaking(); setOrbState('idle'); addJarvisMessage('*[Interrupted]*'); }
+          }}
+        />
         <div className="chat-container">
           <div className="chat-log">
             {messages.map(msg => <ChatMessage key={msg.id} msg={msg} />)}
@@ -674,14 +332,6 @@ export default function App() {
             <div ref={chatEndRef} />
           </div>
         </div>
-        <WidgetBar
-          onCommand={handleCommand}
-          onClear={() => {
-            setMessages([]);
-            localStorage.removeItem('jarvis_chat_history');
-            addJarvisMessage('Chat history cleared, sir. Clean slate.');
-          }}
-        />
         <div className="input-area">
           <button className={`mic-btn ${isListening ? 'active' : ''}`} onClick={handleMic} title="Voice Input">
             <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
@@ -705,36 +355,12 @@ export default function App() {
       </main>
 
       {showGoals && <GoalsOverlay onClose={() => setShowGoals(false)} />}
-      {focusMode && (
-        <FocusOverlay
-          minutes={focusMode.minutes}
-          paused={focusPaused}
-          onPause={() => setFocusPaused(p => !p)}
-          onStop={handleFocusStop}
-        />
-      )}
+      {focusMode && <FocusOverlay minutes={focusMode.minutes} paused={focusPaused} onPause={() => setFocusPaused(p => !p)} onStop={handleFocusStop} />}
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
       {showSkills && <SkillsPanel onClose={() => setShowSkills(false)} />}
       {showJournal && <JournalPanel onClose={() => setShowJournal(false)} />}
       {showAnalytics && <AnalyticsDashboard onClose={() => setShowAnalytics(false)} />}
-      {showWeeklyReport && (
-        <WeeklyReport
-          onClose={() => setShowWeeklyReport(false)}
-          autoGenerate={isWeeklyReportDue()}
-        />
-      )}
-      {showMorningRitual && (
-        <MorningRitual
-          onComplete={(summary) => { setShowMorningRitual(false); addJarvisMessage(summary); speakResponse(summary); }}
-          onSkip={() => setShowMorningRitual(false)}
-        />
-      )}
-      {showEveningDebrief && (
-        <EveningDebrief
-          onComplete={(summary) => { setShowEveningDebrief(false); addJarvisMessage(summary); speakResponse(summary); }}
-          onSkip={() => setShowEveningDebrief(false)}
-        />
-      )}
+      {showWeeklyReport && <WeeklyReport onClose={() => setShowWeeklyReport(false)} autoGenerate={isWeeklyReportDue()} />}
     </div>
   );
 }

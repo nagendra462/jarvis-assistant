@@ -208,8 +208,8 @@ function jarvisServerPlugin() {
 
           // Use the library's built-in SSML template via prosody object — plain text + options.
           // Passing raw SSML to toStream() causes the library to double-wrap it.
-          const pitchStr = pitch !== undefined ? `${pitch >= 0 ? '+' : ''}${pitch}st` : '-2st';
-          const rateStr  = rate  !== undefined ? `${rate  >= 0 ? '+' : ''}${rate}%`   : '-5%';
+          const pitchStr = pitch !== undefined ? `${pitch >= 0 ? '+' : ''}${pitch}st` : '+0st';
+          const rateStr  = rate  !== undefined ? `${rate  >= 0 ? '+' : ''}${rate}%`   : '+0%';
 
           const { audioStream } = tts.toStream(
             text.trim(),
@@ -240,4 +240,17 @@ function jarvisServerPlugin() {
 export default defineConfig({
   plugins: [react(), jarvisServerPlugin()],
   server: { host: true, port: 3000 },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Split Firebase (~290KB) into its own lazy-loaded chunk
+          'firebase-vendor': ['firebase/app', 'firebase/firestore'],
+          // Split React into its own stable chunk for better caching
+          'react-vendor': ['react', 'react-dom'],
+        }
+      }
+    },
+    chunkSizeWarningLimit: 400,
+  }
 });
